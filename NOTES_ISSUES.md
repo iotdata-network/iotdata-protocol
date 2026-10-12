@@ -168,3 +168,74 @@ of describing how.
 
 Every new DIAG kind that travels both ways pays symptom 1 again -- two append sites, two code paths,
 two chances to disagree. TRACE is the first; a reachability kind would be the second.
+
+## I.3 A command sent over the air is never acknowledged, so the manager cannot tell refused from unknown
+
+Raised 2026-10-12 while widening the app control seam so a refusal stops reading as a missing
+feature. That fixed the wording at the node; it could not fix it at the far end, because there is
+nothing at the far end to fix.
+
+### What
+
+A CONTROL key travels in a DOWN frame and produces no reply. The node services it, declines it, or
+has never heard of it, and in all three cases the manager sees exactly the same thing: nothing. The
+only evidence a command existed is a side effect the operator has to go looking for -- a STATUS
+field that changed, a reboot, a report that arrived anyway.
+
+The node knows which of the three happened. `node_process_control` counts `stat_commands`,
+`stat_refused` and `stat_unknown`, and holds the last refusal's words. None of them leaves the
+node: they are read by the relay's own console and by nothing else. The CONTROL report answers
+"which commands do you accept", which is a different question -- a node advertises `node-rollback`
+whether or not it has a slot to roll back to, because it does implement the verb.
+
+### The evidence
+
+- `iotdata_node_control_pack()` packs the INVENTORY only. There is no counter, no last-command
+  field, and no per-command status anywhere in the five reports.
+- The relay console gets the answer by snapshotting `stat_unknown` and `stat_refused` around
+  `node_process_control` and seeing which moved. That trick works because the console is INSIDE the
+  node. Over the air there is nothing to snapshot.
+- The gateway reaches the same outcome a third way: for its own content commands it borrows the
+  content module's emit and forwards the SAY lines to MQTT as `diag` responses. That is a module
+  being helpful, not a protocol feature, and only the content module does it.
+- Three dispatchers -- `iotdata_node_runtime.h`, `relay_node.h` and the gateway's
+  `iotdata_gateway_node.h` -- each keep their own copy of these counters, which is a sign the
+  counters are incidental rather than part of anything.
+
+### Why nothing catches it
+
+Every host test drives the handler directly and reads the counters directly, because it is linked
+into the same process. The testbed proves a command WORKED by observing the effect -- a relay that
+rebooted, a bundle that applied. Neither harness can notice that a command which did NOT work is
+indistinguishable from one aimed at a node that never had the verb, because neither harness ever
+has to ask a node what happened.
+
+In the field it shows up as the thing that prompted this entry: `node rollback` to a relay with no
+fallback slot looks exactly like `node rollback` to a build compiled without it, and the operator's
+next move -- check the build flags, reflash -- is wrong in one of those two cases.
+
+### What the options look like
+
+1. **Leave it.** The operator confirms by consequence: ask for STATUS afterwards and see. Cheap,
+   and it is what every command does today. The cost is that the confirmation is a second
+   round-trip the operator has to know to make, and on a node whose receive window is minutes wide
+   that is minutes before "did my command land" can even be asked.
+2. **A counter triple in STATUS.** `commands`, `refused`, `unknown` as three u32s in the node
+   group, so the manager diffs them across two reports. Nearly free on the wire, reuses a report
+   that is already being asked for, and needs no new format. It says how many, not which: two
+   commands in one frame and the manager can tell that one was refused but not which one.
+3. **An ACK TLV on the UP path.** The node answers a CONTROL frame with one record per key --
+   subject, action, result. Exact, and it makes `iotdata_node_control_result_t` a wire type rather
+   than an internal one. It is also a new TLV, a new direction for an exchange that has so far been
+   one-way, and a question about what happens when the ack is the frame that gets lost.
+4. **A refusal is a DIAGNOSTICS record.** The node already has a recorder with a report nobody has
+   to extend, and a refusal is exactly the kind of thing it exists to remember. Costs nothing new
+   in the protocol; costs a diagnostics pull to find out, and says nothing on a node built without
+   the recorder.
+
+### What it costs to leave
+
+Every verb that can be refused for a runtime reason adds another way for a remote operator to
+misread silence. There are four already -- rollback with no fallback slot, an OTA apply with
+updates switched off, an OTA apply while one is running, a cart command with `CART_ENABLE` off --
+and each of them is a condition that can only be discovered by standing in front of the node.
