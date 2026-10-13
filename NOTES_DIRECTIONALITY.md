@@ -172,5 +172,5 @@ and §5 is a property of the mesh-layered case, not of the base protocol.
 ---
 
 *Origin: reasoning-through session of 2026-09-13, working from `iotdata.h`,
-`iotdata_mesh.h`, `iotdata-common/include/iotdata_node_down.h` and the relay's
+`iotdata_mesh.h`, `iotdata-platform/include/iotdata_node_down.h` and the relay's
 `relay_forward.h` / `relay_ack.h`.*
