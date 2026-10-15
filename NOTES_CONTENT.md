@@ -605,7 +605,7 @@ still repeats it to each sensor in turn, which §11 shows is the cost that actua
 
 - at most **one request outstanding** — the responder is then entirely stateless
 - ask for what **fits the window that is open**, using the same airtime arithmetic the down path
-  already uses (`iotdata_node_receive_fits_ms`)
+  already uses (`iotdata_node_receive_fits_s`)
 - keep a **have-bitmap**, which must persist: a transfer spans many wake cycles and probably a
   reboot. At 32-byte chunks a 512 KiB object is 2 KiB of bitmap and a 20 KiB delta is 80 bytes.
   Since the requester asks for contiguous ranges, reception is mostly in order, so a **high-water

@@ -31,7 +31,7 @@ package and deliver what a node is, how it is doing, what it can be told, and wh
 As with the base protocol and the mesh, the spec comes with a **library implementation**, so the
 conformant behaviour is something a node inherits rather than reimplements.
 
-### Two principles, applied everywhere
+### Three principles, applied everywhere
 
 **(a) System or proprietary, by the upper bit.** Every space this protocol defines is split in half
 by its top bit: the lower half is defined here, the upper half belongs to whoever is building the
@@ -50,6 +50,22 @@ in the top half without changing a rule.
 
 **(b) A mandatory minimum, then best practice.** What a node MUST do is small and testable. Beyond
 it, this note says what works well and why, and a node is free to disagree.
+
+**(c) The unit suits the quantity on the wire, and the name says which it is.** A field's unit is
+chosen for what it measures and for the width it has to fit: a receive window is u16 **seconds**
+(18.2 hours at the top, and nothing on the air needs finer), a report cadence likewise, an interval
+and its phase are u16 **minutes** (a week fits in the field, and no schedule wants finer). Nothing
+on the wire, in a settings block or in a config row carries a millisecond.
+
+Inside an implementation the opposite holds: every duration is **milliseconds** against a monotonic
+tick, because that is what the platform's clock is and because mixed units in arithmetic is how a
+5-second window becomes an 83-minute one. The two meet at exactly one named conversion per
+quantity -- at the parse, or at the accessor -- and never at each point of use.
+
+The unit is part of the name wherever a name exists: `node-window-s`, `node-interval-m`,
+`node-report-status-period-s`, `window_at_ms`. A quantity that does not say its unit leaves a reader
+guessing, and a unit that later changes then breaks the spelling, loudly, instead of passing as a
+number that quietly means something else.
 
 ## 2a. The types, and what kind of thing each one is
 
@@ -353,23 +369,44 @@ advertisement (NOTES_DOWNSTREAM §4).
 
 | key | width | meaning |
 |---|---|---|
-| 0x00 `DURATION` | u16 | milliseconds the receiver stays on |
+| 0x00 `DURATION_S` | u16 | seconds the receiver stays on |
 | 0x01 `TYPES` | u32 | bitmask, bit N = "I accept TLV type N" |
-| 0x02 `OFFSET` | u16 | **proposed**: seconds until the window opens |
+| 0x02 `DELAY_S` | u32 | seconds until the window opens; absent = 0 = now |
 
-**Absence of DURATION means the system default**, 5000 ms, rather than "no window" -- a holder has
+**Absence of DURATION_S means the system default**, 5 s, rather than "no window" -- a holder has
 to decide whether a frame fits before sending it and cannot do that against an unknown. There is no
 concept of an always-on station: a permanently listening node advertises a very large duration and
 is handled by exactly the same rules.
 
-**OFFSET is new and not yet implemented.** It lets a node say "I will be available in an hour"
-rather than only "I am available now", which is what a duty-cycled node with a long sleep actually
-wants to express. u16 seconds gives an 18.2-hour ceiling, which is the same trade as CONTENT's
-expiry being minutes rather than seconds. Two consequences, both in the down module:
+**DELAY_S says the window is not NOW.** A sensor that transmits once or twice a day can piggyback
+"and I will be listening this evening" onto a reading it was sending anyway, instead of waking at
+the chosen hour to send a bare RECEIVE for no other reason. It could always send that bare frame;
+this is the efficient form of the same statement. Absent means zero means now, so the ordinary node
+pays nothing for the key existing.
 
-- the trigger changes from *on snoop, send* to *on snoop, send at the stated time*
-- `iotdata_node_receive_fits()` must size against the window's own duration rather than against
-  what remains of it from now
+Seconds, because a countdown has to resolve at least as finely as the window it precedes; u32,
+because the cap does not fit u16 seconds (18.2 h). **The cap is two days**, and it is a policy
+rather than a width: it covers morning-to-evening with a night to spare, keeps `now_ms + delay` far
+inside the 49.7 days a u32 of milliseconds holds, and stops a bad advertisement parking a holder's
+timer out of reach. It is applied when building *and* when parsing, because the number arms a timer
+at the far end. An over-cap value is **clamped, never dropped**: absence means now, so dropping it
+would turn "in a week" into "right now" -- the one reading that puts a frame on the air at a node
+that is asleep.
+
+**What is built, and what is not.** The library parses `DELAY_S`, keeps it in
+`iotdata_node_receive_t`, and states it when a node passes one to `iotdata_node_receive_build()`.
+On the holder side, `iotdata_node_down_window()` now records the window's **opening instant**
+rather than the moment it heard about it, so `iotdata_node_down_window_remaining_ms()` answers 0
+until that instant and the frame is held instead of transmitted. The missing half is the trigger:
+delivery still happens *on snoop* only, not *at the stated time*. Until that exists a delayed
+window costs a delivery rather than earning one, which is why `iotdata_node_receive_append()` states
+no delay of its own -- a node that wants to must pass one deliberately.
+
+**`DELAY_S` and SETTINGS `offset_m` are different quantities**, and were briefly the same word. The
+delay is a countdown from now: seconds, recomputed for every frame, read by whoever is holding one.
+`offset_m` is a phase within the interval: minutes, persisted, set once by an operator, read by the
+node's own scheduler to place its window inside the cycle so that a fleet does not wake together.
+Neither converts into the other, and only the countdown belongs in this TLV.
 
 ### 3.2 VERSION (0x01) -- what this node IS
 
@@ -543,10 +580,10 @@ number.
 
 | range | keys |
 |---|---|
-| 0x00-0x08 | uptime, lifetime, restarts, reason, temperature, supply, heap free/min, active |
+| 0x00-0x08 | uptime_secs, lifetime_secs, restarts, reason, temperature_c, supply_mv, heap_free_bytes/heap_min_bytes, active_secs |
 | 0x09-0x0C | stations count + entry, filters count + entry |
 | 0x0D-0x0E | **content count + entry** |
-| 0x40-0x4F | mesh state, parent, cost, generation, parent rssi, accepting, and the counters |
+| 0x40-0x4F | mesh state, parent, cost, generation, parent_rssi_dbm, accepting, and the counters |
 | 0x50-0x51 | mesh peers count + entry |
 
 **The content table says what this node is holding or in the middle of.** It is the observability
@@ -765,7 +802,7 @@ writing use one mechanism and the response is always what is now true.
 |---|---|
 | 0x00 `STATION` | u16. **MUST persist** -- this is commissioning |
 | 0x01 `REPORT` | repeated: `[subject][flags:u16][period:u16][change:u16][events:u16]` (§2b) |
-| 0x02 `RECEIVE` | `[window:u16 ms][interval:u16 s][offset:u16 s]` -- always the triple |
+| 0x02 `RECEIVE` | `[window:u16 s][interval:u16 m][offset:u16 m]` -- always the triple |
 
 **There is no sentinel, because there is no "not set".** Every settings field always holds a value:
 seeded from the build, restored from persistence, or replaced by a write -- exactly as a config row
@@ -882,7 +919,9 @@ Cross-cutting:
   because CONTENT adds actions and the test should be written against the finished set.
 - **ON_CHANGE and ON_EVENT are carried, not yet fired.** AT_STARTUP and ON_PERIOD drive the
   schedulers; the other two flags persist and report but nothing acts on them.
-- **RECEIVE**: add `OFFSET`, and teach the down module that a window can be in the future.
+- **RECEIVE `DELAY_S` is carried, not yet acted on.** The key is parsed, stated and capped, and the
+  down module records the window's opening instant so a delayed window is held rather than served
+  (§3.1). What is left is the trigger: send *at* that instant instead of only on the next snoop.
 - **The ignore-unknown rule**: assert it in the per-app dispatch, where it would actually break.
 - **VERSION at startup**: assert the conformance floor rather than leaving it to configuration.
 - **A reportable-type predicate** now decides what can be asked for, so DISCRIMINATOR is correctly
