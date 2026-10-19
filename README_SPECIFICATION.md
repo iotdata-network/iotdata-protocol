@@ -2737,7 +2737,7 @@ Gateway (hears directly)   Relay A (hears sensor)
 ```
 
 When a relay hears a raw sensor packet (any variant 0–14), it waits a short
-random backoff (200–1000ms). If during that backoff it hears another relay
+random backoff (500–3000ms). If during that backoff it hears another relay
 forward the same packet (identified by matching origin station and sequence), it
 suppresses its own forward. This Trickle-style suppression reduces redundant
 airtime in areas where multiple relays overlap.
@@ -2755,10 +2755,10 @@ Each FORWARD is acknowledged by the receiving parent to confirm delivery.
 ```text
 Relay A                          Relay B (A's parent)
   │                             │
-  │──── FORWARD (seq=X) ───────>│
+  │──── FORWARD (sensor S/N) ──>│
   │                             │
-  │<──── ACK (fwd_station=A, ──>│
-  │           fwd_seq=X)        |
+  │<──── ACK (origin_station=S, │
+  │           origin_sequence=N)|
   │                             |
   [clear retry timer]           [forward inner packet upstream]
 ```
@@ -3017,14 +3017,17 @@ sensor transmission, regardless of how many relays have occurred.
 
 #### G.4.5. ACK (ctrl_type 0x2)
 
-Relay-by-relay acknowledgement of a received FORWARD.
+Relay-by-relay acknowledgement of a received FORWARD — or, from a gateway, of a
+sensor packet it heard directly (G.5.3). It names the sensor packet, not the hop
+it came by: any relay holding that packet, queued or awaiting its own ACK, drops
+it, whoever the ACK is from.
 
-| Byte | Bits | Field                       | Range   | Notes                               |
-| ---- | ---- | --------------------------- | ------- | ----------------------------------- |
-| 0–1  | 4+12 | `0xF` \| `sender_station`   | 0–4095  | Parent sending the ACK              |
-| 2–3  | 16   | `sender_seq`                | 0–65535 |                                     |
-| 4–5  | 4+12 | `ctrl=0x2` \| `fwd_station` | 0–4095  | Child whose FORWARD is being ACKed  |
-| 6–7  | 16   | `fwd_seq`                   | 0–65535 | Child's sender_seq from the FORWARD |
+| Byte | Bits | Field                          | Range   | Notes                               |
+| ---- | ---- | ------------------------------ | ------- | ----------------------------------- |
+| 0–1  | 4+12 | `0xF` \| `sender_station`      | 0–4095  | Parent (or gateway) sending the ACK |
+| 2–3  | 16   | `sender_seq`                   | 0–65535 |                                     |
+| 4–5  | 4+12 | `ctrl=0x2` \| `origin_station` | 0–4095  | Sensor whose packet is being ACKed  |
+| 6–7  | 16   | `origin_sequence`              | 0–65535 | That packet's iotdata sequence      |
 
 **Total: 8 bytes.**
 
@@ -3405,21 +3408,30 @@ periodic timers:
 
 #### G.5.3. Gateway Additions
 
-An existing iotdata gateway requires three additions to support mesh:
+An existing iotdata gateway requires three additions to support mesh, and a
+fourth is optional:
 
-**Beacon origination:** Every N seconds (60 default), transmit a BEACON with
+**Beacon origination:** Every N seconds (150 default), transmit a BEACON with
 cost=0 and an incrementing generation counter. The gateway_id is the gateway's
 own station_id.
 
 **FORWARD handling:** On receiving a variant 15 packet with ctrl_type 0x1,
 extract the inner packet starting at byte 6 and process it through the normal
-iotdata receive path (decode, store, display). Send an ACK back to the FORWARD's
-sender.
+iotdata receive path (decode, store, display). Send an ACK for the inner packet
+back to the FORWARD's sender.
 
 **Duplicate suppression:** Maintain a ring buffer of recently-seen {station_id,
 sequence} pairs. Check every incoming sensor packet (whether received directly
 or unwrapped from a FORWARD) against this ring. Discard duplicates, keeping the
 first arrival.
+
+**Direct ACK (optional):** On receiving a sensor packet directly that is not a
+duplicate, ACK it as well. A relay that heard the same packet is backing off
+before forwarding it (500–3000ms), and the ACK makes it drop the forward: air
+time saved at the relay, and at the gateway. Two gateways hearing one packet
+would ACK together and collide, so each answers in its own 200ms slot, the
+first at once, and one that learns while it waits that another has the packet
+(by hearing its ACK, or over a link between the gateways) stands down.
 
 The existing iotdata decode path for variants 0–14 is completely untouched.
 
@@ -3482,14 +3494,14 @@ collision probability.
 #### G.5.7. Forward Suppression (Trickle)
 
 When a relay hears a raw sensor packet that it intends to forward, it waits a
-random backoff period (200–1000ms) before transmitting the FORWARD. During this
+random backoff period (500–3000ms) before transmitting the FORWARD. During this
 backoff, if the node hears another relay transmit a FORWARD containing the same
 inner packet (identified by matching origin station and sequence in the inner
 header), it cancels its own forward.
 
 This Trickle-style suppression (inspired by RFC 6206) significantly reduces
 redundant airtime in areas where multiple relay nodes have overlapping coverage.
-In the worst case (no other relay forwards), it adds 200–1000ms latency to the
+In the worst case (no other relay forwards), it adds 500–3000ms latency to the
 first relay. In dense areas, it eliminates duplicate transmissions entirely.
 
 #### G.5.8. Reception Survey Operation

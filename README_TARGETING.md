@@ -2064,7 +2064,7 @@ Per-relay latency for a forwarded packet:
 
 | Component                    | Typical     | Notes                                     |
 | ---------------------------- | ----------- | ----------------------------------------- |
-| Trickle backoff              | 200–1000 ms | Random, first-relay only for sensor→relay |
+| Trickle backoff              | 500–3000 ms | Random, first-relay only for sensor→relay |
 | LoRa TX time (30 bytes, SF7) | ~50 ms      | Higher SF increases proportionally        |
 | ACK wait                     | 0–500 ms    | Timeout before retry                      |
 | Processing overhead          | < 1 ms      | Negligible on ESP32                       |
@@ -2282,7 +2282,7 @@ sequence already in the ring (whether from local receive or cross-gateway
 notification), it is suppressed.
 
 **Timing:** On a LAN, UDP broadcast latency is under 1ms. LoRa packet
-transmission plus relay backoff is typically 200–1000ms. This means the
+transmission plus relay backoff is typically 500–3000ms. This means the
 cross-gateway notification almost always arrives before the second copy of the
 sensor data, achieving reliable suppression. In the rare case where two gateways
 receive the same packet within 1ms of each other (both heard the sensor
