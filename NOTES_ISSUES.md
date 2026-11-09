@@ -239,3 +239,139 @@ Every verb that can be refused for a runtime reason adds another way for a remot
 misread silence. There are four already -- rollback with no fallback slot, an OTA apply with
 updates switched off, an OTA apply while one is running, a cart command with `CART_ENABLE` off --
 and each of them is a condition that can only be discovered by standing in front of the node.
+
+---
+
+## I.4 A node disowns its own broadcast for thirty seconds, but a relay hands it back minutes later
+
+**Status: PARKED 2026-11-09**, deliberately and with the evidence already in hand. Option 1 is
+ruled out. Between 2 and 3 the answer turns on what provenance MEANS on a down frame, which is a
+specification question rather than a patch, and the next documentation pass -- consolidating what
+is written against what implementation has since taught -- is where it should be answered. A
+protocol change is acceptable if that is where it lands.
+>
+> IT DOES NOT BLOCK CONTENT, which is why parking it is safe rather than merely convenient. §4's
+> station rule already refuses an inbound manifest naming one of our own ids, so nothing a node
+> holds or offers can be damaged by its own echo; what is wrong is a diagnostic counter and the
+> double execution of a broadcast CONTROL frame, neither of which is in the manifest or transfer
+> path. The one thing to re-check when TRANSFER lands is the eight-slot ring against a chunk frame
+> rate -- and acting twice on a chunk writes the same bytes at the same offset, so even that is
+> idempotent.
+
+Raised 2026-11-09 from the content system tests, which made it visible on the bench for the first
+time: the gateway's log shows it refusing its OWN content ids, by the hundred, over a twenty minute
+run.
+
+### What
+
+A node records every down frame it originates in the acted ring, so the echo coming back off a
+relay is a repeat by construction and nothing acts on it twice. That is what let `broadcast` stop
+being a special case for the gateway, and it is the right model.
+
+The ring has one window for two different jobs:
+
+  ONE, the same frame heard by two paths within seconds. Wants a SHORT window, because -- as the
+  header says in as many words -- "a deliberate repeat after the window is a new command and is
+  acted on, which is what makes the window short: re-sending something because it seemed not to
+  arrive has to work".
+  TWO, the echo of our own origination. Wants a window as long as the frame can still be in
+  flight, which is not seconds: a relay HOLDS a broadcast down frame and delivers it to each
+  station when that station is next listening. On this bench that is a 60s receive period. In
+  deployment it is six hours, and the frame stays live in the relay's slot table for a week.
+
+Thirty seconds serves the first job and cannot serve the second. Eight slots make it worse: the
+ring evicts by age, and a gateway staging control frames and re-advertising content fills eight
+slots well inside the window, so an origination can lose its slot before its echo returns.
+
+### The evidence
+
+From the gateway's journal, station 001, during the content suite. It broadcasts, the relay repeats
+it, and the frame comes back byte-for-byte identical:
+
+```
+20:49:24.802  node: down -> FFF (43 bytes, stored, content)
+20:49:24.813  device-e22900t22: write: sent 43 bytes
+20:49:24.813  0000: 0F FF FF FF 40 0E 24 01 00 10 08 00 01 C0 BA 68 ...
+20:49:24.813  content: 001008 re-advertised
+20:49:28.709  device-e22900t22: read: 43 bytes, rssi=-39 dBm
+20:49:28.709  0000: 0F FF FF FF 40 0E 24 01 00 10 08 00 01 C0 BA 68 ...   <- the same bytes
+```
+
+and then, repeatedly, the node declining its own work:
+
+```
+20:51:43.816  content: offer 001008 not taken -- that id belongs to another station
+20:52:47.610  content: offer 00100a not taken -- that id belongs to another station   (+34s)
+20:53:44.327  content: offer 00100a not taken -- that id belongs to another station   (+45s)
+20:53:55.528  content: offer 00100a not taken -- that id belongs to another station   (+7s)
+```
+
+Station 001 is the gateway. `001008` and `00100a` carry 001 in their upper bits, so by §4 only the
+gateway can have authored them: every one of those lines is the node meeting its own echo. The +34s
+and +45s cases are outside the window. The +7s case is inside it, which is the eviction.
+
+### Why nothing catches it
+
+The host test hands the echo straight back:
+
+```c
+/* exactly the bytes we put on the air, handed back as a relay would */
+ASSERT(!node_on_packet(&ns, captured_packets[before], (size_t)mine_len, IOTDATA_STATION_BROADCAST));
+```
+
+Same tick, same `now_ms`, one frame in the ring. It passes, and it will keep passing. What it does
+not model is the two things that actually happen: a delay, because the relay holds the frame for a
+station's window, and traffic, because a real node originates more than one frame at a time.
+
+Both are a loop and a clock away from being covered, and `iotdata_node_down_acted()` takes `now_ms`
+as an argument, so neither needs a bench to demonstrate. Driving the ring directly:
+
+```
+the window: a relay holds a broadcast and hands it back on the station's own window
+  ok   we originate it, and record it as we go
+  ok   the echo 4s later is a repeat -- what the host test covers
+  FAIL and the echo 45s later is STILL a repeat
+  FAIL and after a 6h deployment receive window
+
+the slots: a node originates more than one frame at a time
+  FAIL our frame is still disowned after 8 more went out
+```
+
+THE THIRD ONE IS THE SHARPEST, and it was not what prompted this. The echo in that case comes back
+after ONE SECOND -- well inside the window -- and is acted on anyway, because eight other
+originations have taken every slot and ours was evicted by age. A gateway mid-test stages control
+frames and re-advertises content; eight is not many.
+
+### What it costs today, which is not nothing
+
+For CONTENT the damage is already stopped, but by the OTHER guard: §4's station rule refuses an
+inbound manifest naming one of our own ids (`ERR_STATION`). So the bytes are safe -- and the cost
+is that `stat_foreign`, whose job is to count peers naming ids that are not theirs, counts mostly
+US. A field gateway shows a climbing foreign count caused entirely by its own advertisements, which
+is a diagnostic that cannot be read.
+
+For a broadcast CONTROL frame there is no second guard. A command addressed to the fleet is
+addressed to us as well -- that is the point of accepting broadcasts -- so when a relay hands it
+back after the window, the originating node executes its own fleet command a second time. Nothing
+in the acted ring's own reasoning intends that; it is what the thirty seconds is for.
+
+### What the options look like
+
+  ONE: make the window long enough for the second job -- `ttl_bcast_ms`, since that is exactly how
+  long the frame can still be in flight -- and accept that an operator re-sending a command inside
+  that window is ignored. Cheapest, and it breaks the thing the short window was protecting. NOTE
+  that on its own it does not even fix this: the eviction case above fails after one second, so
+  whatever the window becomes, the ring also has to hold as many frames as a node can have in
+  flight. A longer window with eight slots is a ring that forgets faster the busier it gets.
+
+  TWO: two rings, because there are two jobs. A small short-window ring for "heard twice", and a
+  separate origination record kept for as long as our own frame can live. Costs a second ring and
+  says what it means.
+
+  THREE: stop using time for the second job at all. Our own origination is knowable exactly -- a
+  sequence we issued -- so a node could recognise its own frame by identity rather than by bytes
+  inside a window. Cleanest, and the largest change: it wants a field, or a rule about what the
+  header already carries.
+
+The choice turns on whether a deliberate re-send has to work, which is an operator question rather
+than a protocol one, and is why this is here rather than patched.
